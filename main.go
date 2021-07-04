@@ -43,7 +43,7 @@ var (
 func main() {
 	// Process command line flags.
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s DIR\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [OPTION]... DIR\n\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -53,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 	if flag.NArg() != 1 {
-		fmt.Fprintf(flag.CommandLine.Output(), "directory to generate gallery from not specified")
+		fmt.Fprintf(flag.CommandLine.Output(), "directory to generate gallery from not specified\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
