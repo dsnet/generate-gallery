@@ -10,7 +10,7 @@ Each preview image is a link to the original media file.
 
 The tool can be installed with:
 ```
-$ go install github.com/dsnet/generate-gallery
+$ go install github.com/dsnet/generate-gallery@latest
 ```
 
 The tool can be invoked as follows, where the program is passed a directory
