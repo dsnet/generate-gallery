@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -35,9 +36,12 @@ import (
 )
 
 var (
-	height = flag.Int("height", 160, "pixel height of each thumbnail")
-	procs  = flag.Int("procs", runtime.NumCPU(), "number of concurrent workers")
-	sortby = flag.String("sortby", "creation_date", "sort the gallery according 'creation_date' or 'file_path'")
+	height  = flag.Int("height", 160, "pixel height of each thumbnail")
+	procs   = flag.Int("procs", runtime.NumCPU(), "number of concurrent workers")
+	sortby  = flag.String("sortby", "creation_date", "sort the gallery according 'creation_date' or 'file_path'")
+	exclude = flag.String("exclude", "", "regular expression pattern of paths to exclude")
+
+	excludeRx *regexp.Regexp
 )
 
 func main() {
@@ -51,6 +55,15 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "invalid 'sortby' value: %v\n\n", *sortby)
 		flag.Usage()
 		os.Exit(1)
+	}
+	if *exclude != "" {
+		var err error
+		excludeRx, err = regexp.Compile(*exclude)
+		if err != nil {
+			fmt.Fprintf(flag.CommandLine.Output(), "Invalid 'exclude' pattern: %v\n\n", *exclude)
+			flag.Usage()
+			os.Exit(1)
+		}
 	}
 	if flag.NArg() != 1 {
 		fmt.Fprintf(flag.CommandLine.Output(), "directory to generate gallery from not specified\n\n")
@@ -111,6 +124,9 @@ func main() {
 		}
 		fp := name + exts[0]
 		fi := allFileInfos[fp]
+		if excludeRx != nil && excludeRx.MatchString("/"+filepath.ToSlash(fp)) {
+			continue
+		}
 		items = append(items, mediaItem{
 			filepath: filepath.ToSlash(fp),
 			mediaMetadata: mediaMetadata{
