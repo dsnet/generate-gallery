@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"html"
@@ -35,43 +36,39 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 )
 
-var (
-	height  = flag.Int("height", 160, "pixel height of each thumbnail")
-	procs   = flag.Int("procs", runtime.NumCPU(), "number of concurrent workers")
-	sortby  = flag.String("sortby", "creation_date", "sort the gallery according 'creation_date' or 'file_path'")
-	exclude = flag.String("exclude", "", "regular expression pattern of paths to exclude")
+const (
+	defaultHeight = 160
+	defaultSortBy = "creation_date"
+)
 
-	excludeRx *regexp.Regexp
+var (
+	height  = flag.Int("height", 0, "Pixel height of each thumbnail. (default: "+strconv.Itoa(defaultHeight)+")")
+	sortby  = flag.String("sortby", "", "Sort the gallery according 'creation_date' or 'file_path'. (default: \"creation_date\")")
+	exclude = flag.String("exclude", "", "Regular expression pattern of paths to exclude. (default: none)")
+	procs   = flag.Int("procs", runtime.NumCPU(), "Number of concurrent workers.")
 )
 
 func main() {
 	// Process command line flags.
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [OPTION]... DIR\n\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), strings.Join([]string{
+			"Usage: %s [OPTION]... DIR",
+			"",
+			"This generates a static HTML file at DIR.html containing previews",
+			"of all the images and videos in the specified directory.",
+			"If DIR.html already exists, it is parsed and the original parameters",
+			"and any up-to-date preview items will be used for regeneration.",
+			"Otherwise, the generation parameters used are the defaults listed below.",
+			"",
+			"",
+		}, "\n"), os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if *sortby != "creation_date" && *sortby != "file_path" {
-		fmt.Fprintf(flag.CommandLine.Output(), "invalid 'sortby' value: %v\n\n", *sortby)
-		flag.Usage()
-		os.Exit(1)
-	}
-	if *exclude != "" {
-		var err error
-		excludeRx, err = regexp.Compile(*exclude)
-		if err != nil {
-			fmt.Fprintf(flag.CommandLine.Output(), "Invalid 'exclude' pattern: %v\n\n", *exclude)
-			flag.Usage()
-			os.Exit(1)
-		}
-	}
 	if flag.NArg() != 1 {
-		fmt.Fprintf(flag.CommandLine.Output(), "directory to generate gallery from not specified\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Directory to generate gallery from not specified.\n\n")
 		flag.Usage()
 		os.Exit(1)
-	}
-	if *procs <= 0 {
-		*procs = runtime.NumCPU()
 	}
 
 	// Change into the parent directory.
@@ -82,19 +79,82 @@ func main() {
 	}
 	htmlFile := dirName + ".html"
 
-	// Parse existing .html gallery as a cache.
+	// Parse existing .html gallery (if existing).
+	var page galleryPage
 	var cachedItems map[string]mediaItem
 	if b, err := os.ReadFile(htmlFile); err == nil {
-		cachedItems, err = parseGallery(b)
+		log.Printf("parsing existing %v", htmlFile)
+
+		page, err = unmarshalPage(b)
 		if err != nil {
-			log.Fatalf("parseGallery error: %v", err)
+			log.Fatalf("unmarshalPage error: %v", err)
+		}
+
+		// Instead of directly using the previous items,
+		// use them as a cache in case files have been deleted or modified.
+		cachedItems = make(map[string]mediaItem)
+		for _, item := range page.items {
+			cachedItems[item.filepath] = item
+		}
+		page.items = nil
+
+		// If the preview height for the previous gallery differs from
+		// the specified height, then the previous entries are useless.
+		if *height != 0 && *height != page.Height {
+			log.Printf("discarding cached items since preview height changed: %d => %d", page.Height, *height)
+			cachedItems = nil
 		}
 	}
+
+	// Handle gallery generation parameters.
+	var flags []string
+	var excludeRx *regexp.Regexp
+	var sema chan struct{}
+	if *height != 0 {
+		page.Height = *height
+	} else if page.Height == 0 {
+		page.Height = defaultHeight
+	}
+	if page.Height <= 0 {
+		fmt.Fprintf(flag.CommandLine.Output(), "Invalid 'height' value: %v\n\n", page.Height)
+		flag.Usage()
+		os.Exit(1)
+	}
+	flags = append(flags, fmt.Sprintf("\t-height=%d", page.Height))
+	if *sortby != "" {
+		page.SortBy = *sortby
+	} else if page.SortBy == "" {
+		page.SortBy = defaultSortBy
+	}
+	if page.SortBy != "creation_date" && page.SortBy != "file_path" {
+		fmt.Fprintf(flag.CommandLine.Output(), "Invalid 'sortby' value: %v\n\n", page.SortBy)
+		flag.Usage()
+		os.Exit(1)
+	}
+	flags = append(flags, fmt.Sprintf("\t-sortby=%s", page.SortBy))
+	if *exclude != "" {
+		page.Exclude = *exclude
+	}
+	if page.Exclude != "" {
+		var err error
+		excludeRx, err = regexp.Compile(page.Exclude)
+		if err != nil {
+			fmt.Fprintf(flag.CommandLine.Output(), "Invalid 'exclude' pattern: %v\n\n", page.Exclude)
+			flag.Usage()
+			os.Exit(1)
+		}
+		flags = append(flags, fmt.Sprintf("\t-exclude=%s", page.Exclude))
+	}
+	if *procs <= 0 {
+		*procs = runtime.NumCPU()
+	}
+	sema = make(chan struct{}, *procs)
+	log.Printf("generation flags:\n%s", strings.Join(flags, "\n"))
 
 	// Collect all files in the directory.
 	allFileExts := make(map[string][]string)
 	allFileInfos := make(map[string]os.FileInfo)
-	filepath.Walk(dirName, func(fp string, fi os.FileInfo, err error) error {
+	if err := filepath.Walk(dirName, func(fp string, fi os.FileInfo, err error) error {
 		if err != nil || fi.IsDir() {
 			return err
 		}
@@ -105,10 +165,11 @@ func main() {
 			allFileInfos[fp] = fi
 		}
 		return nil
-	})
+	}); err != nil {
+		log.Fatalf("filepath.Walk error: %v", err)
+	}
 
 	// Collect up all the media items in the gallery.
-	var items []mediaItem
 	for name, exts := range allFileExts {
 		if len(exts) > 1 {
 			// Multiple extensions exist. Sort them such that static images
@@ -127,38 +188,35 @@ func main() {
 		if excludeRx != nil && excludeRx.MatchString("/"+filepath.ToSlash(fp)) {
 			continue
 		}
-		items = append(items, mediaItem{
+		page.items = append(page.items, mediaItem{
 			filepath: filepath.ToSlash(fp),
 			mediaMetadata: mediaMetadata{
-				FileSize:      fi.Size(),
-				FileModify:    fi.ModTime().UTC(),
-				PreviewHeight: *height,
+				FileSize:   fi.Size(),
+				FileModify: fi.ModTime().UTC(),
 			},
 		})
 	}
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].filepath < items[j].filepath
+	sort.Slice(page.items, func(i, j int) bool {
+		return page.items[i].filepath < page.items[j].filepath
 	})
-	log.Printf("processing %d items", len(items))
+	log.Printf("processing %d items", len(page.items))
 
 	// Process every media item.
 	var wg sync.WaitGroup
 	var numCached int
-	sema := make(chan struct{}, *procs)
 	lastPrint := time.Now()
-	for i := range items {
+	for i := range page.items {
 		// Print progress.
 		if now := time.Now(); now.Sub(lastPrint) > time.Second {
-			log.Printf("%d items processed (%0.3f%%)", i, 100.0*float64(i)/float64(len(items)))
+			log.Printf("%d items processed (%0.3f%%)", i, 100.0*float64(i)/float64(len(page.items)))
 			lastPrint = now
 		}
 
 		// Check cache for item.
-		item := &items[i]
+		item := &page.items[i]
 		if cachedItem, ok := cachedItems[item.filepath]; ok &&
 			item.FileSize == cachedItem.FileSize &&
-			item.FileModify.Equal(cachedItem.FileModify) &&
-			item.PreviewHeight == cachedItem.PreviewHeight {
+			item.FileModify.Equal(cachedItem.FileModify) {
 			*item = cachedItem
 			numCached++
 			continue
@@ -173,30 +231,30 @@ func main() {
 			if err := item.loadMetadata(); err != nil {
 				log.Printf("%s: loadMetadata error: %v", item.filepath, err)
 			}
-			if err := item.computePreview(); err != nil {
+			if err := item.computePreview(page.Height); err != nil {
 				log.Printf("%s: computePreview error: %v", item.filepath, err)
 			}
 		}()
 	}
 	wg.Wait()
-	log.Printf("%d items processed (%d from cache)", len(items), numCached)
+	log.Printf("%d items processed (%d from cache)", len(page.items), numCached)
 
 	// Sort the items.
-	if *sortby == "creation_date" {
-		sort.Slice(items, func(i, j int) bool {
-			ti := items[i].dateTime()
-			tj := items[j].dateTime()
+	if page.SortBy == "creation_date" {
+		sort.Slice(page.items, func(i, j int) bool {
+			ti := page.items[i].dateTime()
+			tj := page.items[j].dateTime()
 			if !ti.Equal(tj) {
 				return ti.Before(tj)
 			}
-			return items[i].filepath < items[j].filepath
+			return page.items[i].filepath < page.items[j].filepath
 		})
 	}
 
 	// Write the gallery HTML.
-	html, err := formatGallery(items)
+	html, err := marshalPage(page)
 	if err != nil {
-		log.Fatalf("formatGallery error: %v", err)
+		log.Fatalf("marshalPage error: %v", err)
 	}
 	if b, err := os.ReadFile(htmlFile); err == nil && bytes.Equal(b, html) {
 		log.Printf("no changes made to %v", htmlFile)
@@ -208,54 +266,84 @@ func main() {
 	log.Printf("wrote %v", htmlFile)
 }
 
-func parseGallery(b []byte) (map[string]mediaItem, error) {
-	cachedItems := make(map[string]mediaItem)
+func unmarshalPage(b []byte) (galleryPage, error) {
+	var page galleryPage
+	var parsedHeader int
 	lines := strings.Split(string(b), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "<a ") || !strings.HasSuffix(line, "</a>") {
-			continue
-		}
-
-		// Parse a media item.
-		var item mediaItem
-		var anchor struct {
-			XMLName   xml.Name `xml:"a"`
-			Reference string   `xml:"href,attr"`
-			Image     struct {
-				XMLName  xml.Name `xml:"img"`
-				Source   string   `xml:"src,attr"`
-				Metadata string   `xml:"data-media,attr"`
+		switch {
+		case strings.HasPrefix(line, "<html") && strings.HasSuffix(line, ">"):
+			parsedHeader++
+			var html struct {
+				XMLName  xml.Name `xml:"html"`
+				Magic    string   `xml:"data-magic,attr"`
+				Metadata string   `xml:"data-gallery,attr"`
 			}
+			if err := xml.Unmarshal([]byte(line+"</html>"), &html); err != nil {
+				return page, err
+			}
+			if html.Magic != "generate-gallery" {
+				return page, errors.New("missing magic marker")
+			}
+			b, err := base64.StdEncoding.DecodeString(html.Metadata)
+			if err != nil {
+				return page, err
+			}
+			if err := json.Unmarshal(b, &page.galleryMetadata); err != nil {
+				return page, err
+			}
+		case strings.HasPrefix(line, "<a ") && strings.HasSuffix(line, "</a>"):
+			var item mediaItem
+			var anchor struct {
+				XMLName   xml.Name `xml:"a"`
+				Reference string   `xml:"href,attr"`
+				Image     struct {
+					XMLName  xml.Name `xml:"img"`
+					Source   string   `xml:"src,attr"`
+					Metadata string   `xml:"data-media,attr"`
+				}
+			}
+			if err := xml.Unmarshal([]byte(line), &anchor); err != nil {
+				return page, err
+			}
+			u, err := url.Parse(anchor.Reference)
+			if err != nil {
+				return page, err
+			}
+			item.filepath = u.Path
+			item.previewSrc = anchor.Image.Source
+			b, err := base64.StdEncoding.DecodeString(anchor.Image.Metadata)
+			if err != nil {
+				return page, err
+			}
+			if err := json.Unmarshal(b, &item.mediaMetadata); err != nil {
+				return page, err
+			}
+			page.items = append(page.items, item)
 		}
-		if err := xml.Unmarshal([]byte(line), &anchor); err != nil {
-			return nil, err
-		}
-		u, err := url.Parse(anchor.Reference)
-		if err != nil {
-			return nil, err
-		}
-		item.filepath = u.Path
-		item.previewSrc = anchor.Image.Source
-		b, err := base64.StdEncoding.DecodeString(anchor.Image.Metadata)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(b, &item.mediaMetadata); err != nil {
-			return nil, err
-		}
-		cachedItems[u.Path] = item
 	}
-	return cachedItems, nil
+	switch {
+	case parsedHeader < 1:
+		return page, errors.New("html tag missing")
+	case parsedHeader > 1:
+		return page, errors.New("html tag appeared multiple times")
+	}
+	return page, nil
 }
 
-func formatGallery(items []mediaItem) ([]byte, error) {
+func marshalPage(page galleryPage) ([]byte, error) {
 	var bb bytes.Buffer
-	bb.WriteString("<html>\n")
+	b, err := json.Marshal(page.galleryMetadata)
+	if err != nil {
+		return nil, err
+	}
+	metadata := ` data-gallery="` + base64.StdEncoding.EncodeToString(b) + `"`
+	bb.WriteString("<html data-magic=\"generate-gallery\"" + metadata + ">\n")
 	bb.WriteString("<body>\n")
-	for _, item := range items {
+	for _, item := range page.items {
 		if len(item.previewSrc) > 0 {
-			title := ` title="` + item.dateTime().UTC().Format(time.RFC3339Nano) + `"`
+			title := ` title="` + html.EscapeString(path.Base(item.filepath)) + "; " + item.dateTime().UTC().Round(time.Second).Format("2006-01-02 15:04:05") + `"`
 			b, err := json.Marshal(item.mediaMetadata)
 			if err != nil {
 				return nil, err
@@ -302,6 +390,22 @@ func imageFormatFromExt(ext string) imageFormat {
 	}
 }
 
+type galleryPage struct {
+	// galleryMetadata is metadata about the gallery.
+	galleryMetadata
+	// items is the list of media items in the gallery.
+	items []mediaItem
+}
+
+type galleryMetadata struct {
+	// Height is the pixel height of the preview image.
+	Height int
+	// SortBy is the order to sort preview images by.
+	SortBy string
+	// Exclude is the regular expression pattern of paths to exclude.
+	Exclude string `json:",omitempty"`
+}
+
 // mediaItem is an individual thumbnail to show on the gallery page.
 type mediaItem struct {
 	// filepath is the relative file path using forward slashes.
@@ -323,8 +427,6 @@ type mediaMetadata struct {
 	FileModify time.Time
 	// MediaCreate is the creation time according to the file metadata.
 	MediaCreate time.Time
-	// PreviewHeight is the pixel height of the preview image.
-	PreviewHeight int
 }
 
 // dateTime returns the media creation timestamp if available,
@@ -425,7 +527,7 @@ func (item *mediaItem) loadMetadata() error {
 
 // computePreview generates a preview image for the media item.
 // It populates item.previewSrc.
-func (item *mediaItem) computePreview() error {
+func (item *mediaItem) computePreview(height int) error {
 	fp := filepath.FromSlash(item.filepath)
 	switch format := imageFormatFromExt(filepath.Ext(fp)); format {
 	case jpgFormat, pngFormat:
@@ -443,7 +545,7 @@ func (item *mediaItem) computePreview() error {
 		if item.orientImage != nil {
 			img = item.orientImage(img)
 		}
-		img = resizeImage(img, *height)
+		img = resizeImage(img, height)
 
 		// Encode and write the image.
 		var bb bytes.Buffer
@@ -521,7 +623,7 @@ func (item *mediaItem) computePreview() error {
 			}
 
 			// Resize the image.
-			img = resizeImage(img, *height)
+			img = resizeImage(img, height)
 
 			// Encode and write the frame.
 			bb.Reset()
@@ -569,14 +671,14 @@ func (item *mediaItem) computePreview() error {
 			if dur < 5.0 {
 				frames = 4
 			}
-			if out, err = exec.Command("ffmpeg", "-i", fp, "-vf", "scale=-1:"+strconv.Itoa(int(*height))+",fps="+strconv.Itoa(frames)+"/"+duration, filepath.Join(tmp, "frame_%04d.jpeg")).CombinedOutput(); err != nil {
+			if out, err = exec.Command("ffmpeg", "-i", fp, "-vf", "scale=-1:"+strconv.Itoa(height)+",fps="+strconv.Itoa(frames)+"/"+duration, filepath.Join(tmp, "frame_%04d.jpeg")).CombinedOutput(); err != nil {
 				return fmt.Errorf("ffmpeg decode error: %v\n%v", err, indent(string(out)))
 			}
 		} else {
 			// For long videos, produce individual frames by seeking.
 			for i := 1; i <= 10; i++ {
 				seek := fmt.Sprintf("%f", dur*float64(i)/float64(11))
-				if out, err = exec.Command("ffmpeg", "-ss", seek, "-i", fp, "-vf", "scale=-1:"+strconv.Itoa(int(*height)), "-vframes", "1", filepath.Join(tmp, fmt.Sprintf("frame_%04d.jpeg", i))).CombinedOutput(); err != nil {
+				if out, err = exec.Command("ffmpeg", "-ss", seek, "-i", fp, "-vf", "scale=-1:"+strconv.Itoa(height), "-vframes", "1", filepath.Join(tmp, fmt.Sprintf("frame_%04d.jpeg", i))).CombinedOutput(); err != nil {
 					return fmt.Errorf("ffmpeg decode error: %v\n%v", err, indent(string(out)))
 				}
 			}

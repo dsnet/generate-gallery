@@ -1,10 +1,10 @@
 # Static Gallery Generator
 
-This program generates a single `.html` file containing previews of all images
+This program generates a static `.html` file containing previews of all images
 and videos in a directory. The previews are embedded within the HTML itself
 using the [data URI scheme](https://en.wikipedia.org/wiki/Data_URI_scheme)
 to avoid generating separate preview files for every item in the gallery.
-Each preview image is a link to the original media file.
+Each preview is a link to the original media file.
 
 ## Usage 
 
