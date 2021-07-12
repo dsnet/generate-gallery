@@ -216,7 +216,7 @@ func main() {
 		item := &page.items[i]
 		if cachedItem, ok := cachedItems[item.filepath]; ok &&
 			item.FileSize == cachedItem.FileSize &&
-			item.FileModify.Equal(cachedItem.FileModify) {
+			item.FileModify.Round(time.Millisecond).Equal(cachedItem.FileModify.Round(time.Millisecond)) {
 			*item = cachedItem
 			numCached++
 			continue
