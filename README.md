@@ -6,6 +6,27 @@ using the [data URI scheme](https://en.wikipedia.org/wiki/Data_URI_scheme)
 to avoid generating separate preview files for every item in the gallery.
 Each preview is a link to the original media file.
 
+Example of rendered HTML:
+![example](doc/example.png)
+
+Example of encoded HTML:
+```html
+<html data-magic="generate-gallery" data-gallery=...>
+<body>
+<a href="tsai-family/IMG_1362.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1362.JPG; 2021-05-09 03:57:26" data-media=.../></a>
+<a href="tsai-family/IMG_1360.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1360.JPG; 2021-05-09 18:44:14" data-media=.../></a>
+<a href="tsai-family/IMG_1379.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1379.JPG; 2021-05-17 23:31:44" data-media=.../></a>
+<a href="tsai-family/IMG_1425.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1425.JPG; 2021-06-07 02:07:04" data-media=.../></a>
+<a href="tsai-family/IMG_1464.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1464.JPG; 2021-06-17 19:01:05" data-media=.../></a>
+<a href="tsai-family/IMG_1463.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1463.JPG; 2021-06-19 00:28:51" data-media=.../></a>
+<a href="tsai-family/IMG_1492.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1492.JPG; 2021-06-29 21:26:45" data-media=.../></a>
+<a href="tsai-family/IMG_1494.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1494.JPG; 2021-06-30 22:30:37" data-media=.../></a>
+<a href="tsai-family/IMG_1495.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1495.JPG; 2021-07-01 07:03:33" data-media=.../></a>
+<a href="tsai-family/IMG_1538.JPG" target="_blank"><img src="data:image/jpeg;base64,"... title="IMG_1538.JPG; 2021-07-08 21:14:07" data-media=.../></a>
+</body>
+</html>
+```
+
 ## Usage 
 
 The tool can be installed with:
